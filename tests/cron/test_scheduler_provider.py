@@ -371,6 +371,34 @@ def test_fire_due_default_claims_then_runs(monkeypatch):
     assert ran == ["j1"]
 
 
+def test_fire_due_custom_provider_preserves_exact_source_and_runs(monkeypatch, tmp_path):
+    """A discovered provider name is durable evidence, not a closed allowlist."""
+    import cron.executions as executions
+    import cron.jobs as jobs
+    import cron.scheduler as sched
+    from cron.scheduler_provider import CronScheduler
+
+    class CustomProvider(CronScheduler):
+        @property
+        def name(self):
+            return "custom-provider"
+
+        def start(self, stop_event, **kwargs):
+            return None
+
+    monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "executions.db")
+    monkeypatch.setattr(jobs, "claim_job_for_fire", lambda jid: True, raising=False)
+    monkeypatch.setattr(jobs, "get_job", lambda jid: {"id": jid, "name": "t"})
+    ran = []
+    monkeypatch.setattr(sched, "run_one_job", lambda job, **kw: ran.append(job) or True)
+
+    assert CustomProvider().fire_due("custom-job") is True
+    assert ran[0]["execution_id"]
+    records = executions.list_executions(job_id="custom-job")
+    assert len(records) == 1
+    assert records[0]["source"] == "custom-provider"
+
+
 def test_fire_due_lost_claim_does_not_run(monkeypatch):
     """If the CAS claim is lost (another machine/retry won), fire_due returns
     False and never runs the job."""

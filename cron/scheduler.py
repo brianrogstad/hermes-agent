@@ -1305,6 +1305,11 @@ def _resolve_delivery_targets(job: dict) -> List[dict]:
         return []
 
     raw_parts = [p.strip() for p in deliver.split(",") if p.strip()]
+    raw_filesystem_parts = [
+        part for part in raw_parts if part.lower().startswith("filesystem:")
+    ]
+    if raw_filesystem_parts and len(raw_filesystem_parts) != len(raw_parts):
+        raise ValueError("filesystem and platform delivery targets cannot be mixed")
 
     # Expand routing intents.
     parts: List[str] = []

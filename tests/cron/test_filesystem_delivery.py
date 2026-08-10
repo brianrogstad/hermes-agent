@@ -54,6 +54,14 @@ def test_configured_target_resolution_is_typed_and_rejects_paths(monkeypatch, tm
         scheduler._resolve_delivery_targets({"deliver": f"filesystem:{destination_root}"})
     with pytest.raises(ValueError, match="configured filesystem delivery target"):
         scheduler._resolve_delivery_targets({"deliver": "filesystem:missing"})
+    for mixed in (
+        "filesystem:ana-live,origin",
+        "filesystem:ana-live,all",
+        "filesystem:ana-live,local",
+        "filesystem:ana-live,nonesuch",
+    ):
+        with pytest.raises(ValueError, match="cannot be mixed"):
+            scheduler._resolve_delivery_targets({"deliver": mixed})
 
 
 def test_copy_is_exact_create_once_and_collision_safe(tmp_path):
