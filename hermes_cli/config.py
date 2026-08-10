@@ -2769,6 +2769,9 @@ DEFAULT_CONFIG = {
             # Empty → the fire endpoint refuses all tokens (no unsigned decode).
             "nas_jwks_url": "",
         },
+        # Named, trusted filesystem delivery authorities. Jobs refer to an
+        # entry only as ``filesystem:<id>``; ``deliver`` never accepts a path.
+        "filesystem_delivery_targets": {},
         # Wrap delivered cron responses with a header (task name) and footer
         # ("The agent cannot see this message").  Set to false for clean output.
         "wrap_response": True,

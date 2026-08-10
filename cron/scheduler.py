@@ -12,6 +12,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -278,7 +279,13 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 }
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
-from cron.executions import create_execution, finish_execution, mark_execution_running
+from cron.executions import (
+    create_delivery_execution,
+    create_execution,
+    finish_execution,
+    mark_execution_running,
+    read_delivery_artifact_manifest,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -1165,6 +1172,25 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
                 }
         return None
 
+    if deliver_value.lower().startswith("filesystem:"):
+        target_id = deliver_value.split(":", 1)[1]
+        try:
+            configured = (load_config().get("cron") or {}).get(
+                "filesystem_delivery_targets", {},
+            )
+        except Exception as exc:
+            raise ValueError(
+                "configured filesystem delivery target registry is unavailable"
+            ) from exc
+        if not isinstance(configured, dict) or target_id not in configured:
+            raise ValueError(
+                f"configured filesystem delivery target {target_id!r} does not exist; "
+                "arbitrary paths are forbidden"
+            )
+        from cron.filesystem_delivery import normalize_configured_target
+
+        return normalize_configured_target(target_id, configured[target_id])
+
     if ":" in deliver_value:
         platform_name, rest = deliver_value.split(":", 1)
         platform_key = platform_name.lower()
@@ -1290,11 +1316,52 @@ def _resolve_delivery_targets(job: dict) -> List[dict]:
     for part in parts:
         target = _resolve_single_delivery_target(job, part)
         if target:
-            key = (target["platform"].lower(), str(target["chat_id"]), target.get("thread_id"))
+            if target.get("kind") == "filesystem":
+                key = ("filesystem", target["target_id"])
+            else:
+                key = (target["platform"].lower(), str(target["chat_id"]), target.get("thread_id"))
             if key not in seen:
                 seen.add(key)
                 targets.append(target)
+    target_kinds = {
+        "filesystem" if target.get("kind") == "filesystem" else "platform"
+        for target in targets
+    }
+    if len(target_kinds) > 1:
+        raise ValueError("filesystem and platform delivery targets cannot be mixed")
     return targets
+
+
+def _preflight_check_delivery(job: dict) -> Optional[str]:
+    """Validate delivery configuration without loading gateway state for filesystems."""
+    deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
+    platform_parts: list[str] = []
+    filesystem_parts: list[str] = []
+    for part in deliver_value.split(","):
+        part = part.strip()
+        if not part or part.lower() in {"local", "origin", "all"}:
+            continue
+        if part.lower().startswith("filesystem:"):
+            filesystem_parts.append(part)
+            try:
+                _resolve_single_delivery_target(job, part)
+            except ValueError as exc:
+                return str(exc)
+            continue
+        platform_parts.append(part.split(":", 1)[0].strip())
+    if filesystem_parts and platform_parts:
+        return "filesystem and platform delivery targets cannot be mixed"
+    if filesystem_parts:
+        return None
+    if not platform_parts:
+        return None
+    try:
+        from gateway.config import load_gateway_config
+
+        load_gateway_config()
+    except Exception as exc:
+        return f"failed to load gateway config: {exc}"
+    return None
 
 
 def _resolve_delivery_target(job: dict) -> Optional[dict]:
@@ -1442,7 +1509,11 @@ def _is_channel_dm_topic(
     return is_channel
 
 
-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+def _deliver_result(
+    job: dict, content: str, adapters=None, loop=None,
+    targets: Optional[List[dict]] = None, receipts: Optional[List[dict]] = None,
+    delivery_execution_id: Optional[str] = None,
+) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
 
@@ -1453,7 +1524,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     Returns None on success, or an error string on failure.
     """
-    targets = _resolve_delivery_targets(job)
+    targets = targets if targets is not None else _resolve_delivery_targets(job)
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
         if deliver_value == "local":
@@ -1474,6 +1545,56 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         msg = f"no delivery target resolved for deliver={deliver_value}"
         logger.warning("Job '%s': %s", job["id"], msg)
         return msg
+
+    if all(target.get("kind") == "filesystem" for target in targets):
+        if not delivery_execution_id:
+            return "filesystem delivery requires an owning delivery execution"
+        receipt_evidence = receipts if receipts is not None else []
+        manifest = read_delivery_artifact_manifest(delivery_execution_id)
+        media = manifest.get("media") or []
+        frozen_entries = manifest.get("filesystem") or []
+        if len(media) != 1 or media[0].get("is_voice"):
+            return "filesystem delivery requires exactly one MEDIA image artifact"
+        from cron.filesystem_delivery import copy_filesystem_delivery
+
+        owned = media[0]
+        errors = []
+        for target in targets:
+            frozen = next((entry for entry in frozen_entries
+                           if entry.get("target_id") == target.get("target_id")), None)
+            destination = str(
+                frozen.get("destination_path") if frozen
+                else Path(target["destination_root"]) / ".invalid"
+            )
+            actual = {
+                "kind": "filesystem", "target_id": target["target_id"],
+                "destination_path": destination,
+            }
+            try:
+                if frozen is None:
+                    raise ValueError("filesystem delivery is missing its frozen destination path")
+                proof = copy_filesystem_delivery(
+                    target=target, execution_id=delivery_execution_id,
+                    source_path=str(frozen["source_path"]), artifact_path=str(owned["path"]),
+                    artifact_sha256=str(owned["sha256"]),
+                    artifact_size_bytes=int(owned["size_bytes"]),
+                    destination_path=destination,
+                )
+            except Exception as exc:
+                detail = f"filesystem delivery failed: {exc}"
+                errors.append(detail)
+                receipt_evidence.append({
+                    "requested_target": target, "actual_target": actual,
+                    "status": "failed", "transport": "none", "error": detail,
+                    "provider_receipt_id": None, "filesystem_receipt": None,
+                })
+            else:
+                receipt_evidence.append({
+                    "requested_target": target, "actual_target": actual,
+                    "status": "delivered", "transport": "filesystem", "error": None,
+                    "provider_receipt_id": None, "filesystem_receipt": proof,
+                })
+        return "; ".join(errors) if errors else None
 
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
@@ -3039,7 +3160,7 @@ def run_job(
         load_hermes_dotenv(hermes_home=_get_hermes_home())
 
         delivery_target = _resolve_delivery_target(job)
-        if delivery_target:
+        if delivery_target and delivery_target.get("kind") != "filesystem":
             _VAR_MAP["HERMES_CRON_AUTO_DELIVER_PLATFORM"].set(delivery_target["platform"])
             _VAR_MAP["HERMES_CRON_AUTO_DELIVER_CHAT_ID"].set(str(delivery_target["chat_id"]))
             _VAR_MAP["HERMES_CRON_AUTO_DELIVER_THREAD_ID"].set(
@@ -3047,6 +3168,7 @@ def run_job(
                 if delivery_target.get("thread_id") is None
                 else str(delivery_target["thread_id"])
             )
+        _install_cron_execution_context(job)
 
         # Model resolution precedence: per-job override > HERMES_MODEL env >
         # config.yaml ``model:`` (string or ``{default: ...}``). The per-job
@@ -3621,6 +3743,7 @@ def run_job(
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
+        _clear_cron_execution_context()
         if _session_db:
             # Title the cron session from the job (name -> id) and PERSIST it
             # BEFORE end_session()/close() tear the connection down, so the
@@ -3703,6 +3826,79 @@ def _teardown_cron_agent(agent, job_id: str) -> None:
         logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
+def _install_cron_execution_context(job: dict) -> None:
+    """Export exact task-local execution authority for tools and subprocesses."""
+    from gateway.session_context import _VAR_MAP
+
+    values = {
+        "HERMES_CRON_EXECUTION_ID": str(job.get("execution_id") or ""),
+        "HERMES_CRON_JOB_ID": str(job.get("id") or ""),
+        "HERMES_CRON_EXECUTION_SOURCE": str(job.get("execution_source") or ""),
+        "HERMES_CRON_SCHEDULED_FOR": str(job.get("scheduled_for") or ""),
+        "HERMES_CRON_DELIVERY_TARGETS_JSON": json.dumps(
+            job.get("_resolved_delivery_targets") or [],
+            sort_keys=True, separators=(",", ":"),
+        ),
+    }
+    for name, value in values.items():
+        _VAR_MAP[name].set(value)
+
+
+def _clear_cron_execution_context() -> None:
+    from gateway.session_context import _VAR_MAP
+
+    for name in (
+        "HERMES_CRON_EXECUTION_ID", "HERMES_CRON_JOB_ID",
+        "HERMES_CRON_EXECUTION_SOURCE", "HERMES_CRON_SCHEDULED_FOR",
+        "HERMES_CRON_DELIVERY_TARGETS_JSON",
+    ):
+        _VAR_MAP[name].set("")
+
+
+def _materialize_delivery_artifact(
+    job_id: str, execution_id: str, content: str,
+    delivery_targets: Optional[List[dict]] = None,
+) -> tuple[str, str, List[dict]]:
+    """Bind a filesystem delivery to exactly one trusted non-voice image."""
+    from gateway.platforms.base import BasePlatformAdapter
+
+    media_files, _cleaned = BasePlatformAdapter.extract_media(content)
+    filesystem_targets = [
+        target for target in (delivery_targets or [])
+        if target.get("kind") == "filesystem"
+    ]
+    # Platform filtering historically resolves paths; filesystem authority must
+    # retain the lexical spelling so a symlink can never be laundered to its target.
+    if not filesystem_targets:
+        media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    if filesystem_targets and len(media_files) != 1:
+        raise ValueError("filesystem delivery requires exactly one MEDIA image artifact")
+    media_artifacts = []
+    for media_path, is_voice in media_files:
+        requested_media = Path(media_path).expanduser()
+        if filesystem_targets:
+            from cron.filesystem_delivery import stable_read_source
+
+            if is_voice:
+                raise ValueError("filesystem delivery requires one non-voice image artifact")
+            media, payload = stable_read_source(
+                requested_media, filesystem_targets[0]["source_roots"],
+            )
+        else:
+            media = requested_media.resolve(strict=True)
+            payload = media.read_bytes()
+        media_artifacts.append({
+            "path": str(media),
+            "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload), "is_voice": bool(is_voice),
+        })
+    if len(media_files) != 1:
+        raise ValueError("delivery artifact materialization requires exactly one MEDIA file")
+    artifact = Path(media_artifacts[0]["path"])
+    digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    return str(artifact), digest, media_artifacts
+
+
 def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark.
 
@@ -3722,6 +3918,11 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     if not execution_id:
         execution_id = create_execution(job["id"], source="direct")["id"]
     try:
+        delivery_targets = _resolve_delivery_targets(job)
+        job = dict(job)
+        job["execution_id"] = execution_id
+        job["execution_source"] = job.get("execution_source") or "direct"
+        job["_resolved_delivery_targets"] = delivery_targets
         # Pre-run dispatch claim (issue #38758): atomically commit a finite
         # one-shot's dispatch BEFORE its side effect runs, so a tick that dies
         # mid-execution (gateway kill, OOM, segfault, hard-timeout) cannot
@@ -3831,7 +4032,59 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
             if should_deliver:
                 try:
-                    delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                    filesystem_only = bool(delivery_targets) and all(
+                        target.get("kind") == "filesystem" for target in delivery_targets
+                    )
+                    if filesystem_only:
+                        if not success:
+                            raise ValueError(
+                                "filesystem delivery requires a successful image-producing run"
+                            )
+                        # Producer and delivery are distinct durable attempts. Seal
+                        # producer completion before claiming exact delivery bytes.
+                        finish_execution(execution_id, success=True)
+                        artifact_path, artifact_sha256, media_artifacts = (
+                            _materialize_delivery_artifact(
+                                job["id"], execution_id, deliver_content, delivery_targets,
+                            )
+                        )
+                        delivery_execution = create_delivery_execution(
+                            producer_execution_id=execution_id,
+                            artifact_path=artifact_path,
+                            artifact_sha256=artifact_sha256,
+                            media_artifacts=media_artifacts,
+                            delivery_targets=delivery_targets,
+                        )
+                        mark_execution_running(delivery_execution["id"])
+                        delivery_receipts: List[dict] = []
+                        delivery_error = _deliver_result(
+                            job, deliver_content, targets=delivery_targets,
+                            receipts=delivery_receipts,
+                            delivery_execution_id=delivery_execution["id"],
+                        )
+                        delivered_actual = [
+                            receipt["actual_target"] for receipt in delivery_receipts
+                            if receipt.get("status") == "delivered"
+                        ]
+                        finish_execution(
+                            delivery_execution["id"],
+                            success=delivery_error is None,
+                            error=delivery_error,
+                            delivery_status=(
+                                "delivered" if delivery_error is None else "failed"
+                            ),
+                            delivery_error=delivery_error,
+                            delivery_targets=delivered_actual,
+                            delivery_receipts=delivery_receipts,
+                        )
+                    else:
+                        # Preserve the established platform-delivery call seam.
+                        # _deliver_result resolves the job's platform targets when
+                        # targets is omitted; only typed filesystem delivery needs
+                        # the explicit target/receipt execution context above.
+                        delivery_error = _deliver_result(
+                            job, deliver_content, adapters=adapters, loop=loop,
+                        )
                 except Exception as de:
                     delivery_error = str(de)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)
