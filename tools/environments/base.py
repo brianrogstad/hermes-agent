@@ -454,6 +454,24 @@ class BaseEnvironment(ABC):
     # Session snapshot (init_session)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _unset_task_context_command() -> str:
+        """Return a shell command that removes task-local Hermes authority.
+
+        Session snapshots intentionally persist user exports between terminal
+        calls. Hermes session and cron identity is different: it is injected
+        afresh from ContextVars for every tool call and must never be captured
+        into that persistent snapshot, where a later call could source stale
+        authority over its newly injected process environment.
+        """
+        try:
+            from gateway.session_context import _VAR_MAP
+
+            names = tuple(_VAR_MAP)
+        except Exception:
+            names = ()
+        return "unset " + " ".join(shlex.quote(name) for name in names) if names else ":"
+
     def init_session(self):
         """Capture login shell environment into a snapshot file.
 
@@ -496,8 +514,10 @@ class BaseEnvironment(ABC):
         # static path is shell-quoted (Windows/Git-Bash drive letters, spaces)
         # with ``$BASHPID`` left outside the quotes so it still expands.
         _snap_tmp = self._quote_shell_path(self._snapshot_path + ".tmp.") + "$BASHPID"
+        unset_task_context = self._unset_task_context_command()
         bootstrap = (
             f"umask 077\n"
+            f"{unset_task_context}\n"
             f"export -p > {_snap_tmp}\n"
             # Dump function definitions, filtering out private (``_``-prefixed)
             # helpers — mainly bash-completion internals (``_git``, ``_make``…)
@@ -643,6 +663,7 @@ class BaseEnvironment(ABC):
         # replaces a good snapshot; drop the temp on failure so it isn't
         # orphaned (cleaned up wholesale in LocalEnvironment.cleanup too).
         if self._snapshot_ready:
+            parts.append(self._unset_task_context_command())
             parts.append(
                 f"{{ export -p > {_snap_tmp} && mv -f {_snap_tmp} {_quoted_snap}; }} "
                 f"2>/dev/null || rm -f {_snap_tmp} 2>/dev/null || true"

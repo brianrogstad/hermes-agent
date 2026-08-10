@@ -29,7 +29,12 @@ import pytest
 
 import gateway.session_context as sc
 from gateway.session_context import _VAR_MAP, clear_session_vars, set_session_vars
-from tools.environments.local import _make_run_env, _sanitize_subprocess_env, hermes_subprocess_env
+from tools.environments.local import (
+    LocalEnvironment,
+    _make_run_env,
+    _sanitize_subprocess_env,
+    hermes_subprocess_env,
+)
 
 # The full set of session vars the bridge owns.
 SESSION_VARS = list(_VAR_MAP.keys())
@@ -195,6 +200,30 @@ def test_explicit_empty_thread_id_overrides_stale_value(monkeypatch):
         f"{env.get('HERMES_SESSION_THREAD_ID')!r}"
     )
     assert env.get("HERMES_SESSION_KEY") == "mm:chan"
+
+
+def test_local_snapshot_never_overrides_fresh_cron_execution_authority(tmp_path):
+    """A prior terminal call's snapshot must not pin the next cron beat.
+
+    LocalEnvironment sources its persistent export snapshot after Popen has
+    received the new ContextVar-backed environment. If Hermes task identity is
+    allowed into the snapshot, that source operation silently replaces the new
+    scheduled timestamp with the previous execution's timestamp.
+    """
+    variable = _VAR_MAP["HERMES_CRON_SCHEDULED_FOR"]
+    variable.set("2026-08-10T17:10:00+00:00")
+    env = LocalEnvironment(cwd=str(tmp_path), timeout=15)
+    try:
+        first = env.execute("printf %s \"$HERMES_CRON_SCHEDULED_FOR\"")
+        variable.set("2026-08-10T17:40:00+00:00")
+        second = env.execute("printf %s \"$HERMES_CRON_SCHEDULED_FOR\"")
+    finally:
+        env.cleanup()
+
+    assert first["returncode"] == 0
+    assert first["output"] == "2026-08-10T17:10:00+00:00"
+    assert second["returncode"] == 0
+    assert second["output"] == "2026-08-10T17:40:00+00:00"
 
 
 # --------------------------------------------------------------------------- #
