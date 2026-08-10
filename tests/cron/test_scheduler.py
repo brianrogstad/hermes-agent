@@ -1552,6 +1552,101 @@ class TestRunJobSessionPersistence:
         advance.assert_not_called()
         run_one.assert_not_called()
 
+    def test_tick_freezes_due_time_as_builtin_execution_authority(self, tmp_path):
+        """A due fire carries its pre-advance instant into the execution and job context."""
+        from cron.scheduler import tick
+
+        job = {
+            "id": "authority-due-job",
+            "name": "authority due job",
+            "schedule": {"kind": "cron", "expr": "10,40 * * * *"},
+            "next_run_at": "2026-08-09T22:55:23-05:00",
+            "enabled": True,
+        }
+        with patch("cron.scheduler._hermes_home", tmp_path), patch(
+            "cron.scheduler.get_due_jobs", return_value=[job]
+        ), patch("cron.scheduler.advance_next_run"), patch(
+            "cron.scheduler.create_execution", return_value={"id": "a" * 32}
+        ) as create_execution, patch(
+            "cron.scheduler.run_one_job", return_value=True
+        ) as run_one:
+            assert tick(verbose=False, sync=True) == 1
+
+        scheduled_for = "2026-08-10T03:55:23+00:00"
+        create_execution.assert_called_once_with(
+            "authority-due-job", source="builtin", scheduled_for=scheduled_for,
+        )
+        fired_job = run_one.call_args.args[0]
+        assert fired_job["execution_source"] == "builtin"
+        assert fired_job["scheduled_for"] == scheduled_for
+
+    def test_tick_leaves_subsecond_due_time_unauthoritative(self, tmp_path):
+        """A due instant that cannot be represented exactly is not authority."""
+        from cron.scheduler import tick
+
+        job = {
+            "id": "subsecond-due-job",
+            "name": "subsecond due job",
+            "schedule": {"kind": "cron", "expr": "10,40 * * * *"},
+            "next_run_at": "2026-08-09T22:55:23.123456-05:00",
+            "enabled": True,
+        }
+        with patch("cron.scheduler._hermes_home", tmp_path), patch(
+            "cron.scheduler.get_due_jobs", return_value=[job]
+        ), patch("cron.scheduler.advance_next_run"), patch(
+            "cron.scheduler.create_execution", return_value={"id": "b" * 32}
+        ) as create_execution, patch(
+            "cron.scheduler.run_one_job", return_value=True
+        ) as run_one:
+            assert tick(verbose=False, sync=True) == 1
+
+        create_execution.assert_called_once_with("subsecond-due-job", source="builtin")
+        fired_job = run_one.call_args.args[0]
+        assert fired_job["execution_source"] == "builtin"
+        assert fired_job["scheduled_for"] is None
+
+    def test_tick_contains_due_time_utc_overflow(self, tmp_path):
+        """An unrepresentable UTC conversion cannot abort other due jobs."""
+        from cron.scheduler import tick
+
+        jobs = [
+            {
+                "id": "overflow-due-job",
+                "name": "overflow due job",
+                "schedule": {"kind": "cron", "expr": "10,40 * * * *"},
+                "next_run_at": "9999-12-31T23:59:59-00:01",
+                "enabled": True,
+            },
+            {
+                "id": "ordinary-due-job",
+                "name": "ordinary due job",
+                "schedule": {"kind": "cron", "expr": "10,40 * * * *"},
+                "next_run_at": "2026-08-10T03:55:23+00:00",
+                "enabled": True,
+            },
+        ]
+        with patch("cron.scheduler._hermes_home", tmp_path), patch(
+            "cron.scheduler.get_due_jobs", return_value=jobs
+        ), patch("cron.scheduler.advance_next_run"), patch(
+            "cron.scheduler.create_execution", return_value={"id": "c" * 32}
+        ) as create_execution, patch(
+            "cron.scheduler.run_one_job", return_value=True
+        ) as run_one:
+            assert tick(verbose=False, sync=True) == 2
+
+        assert create_execution.call_count == 2
+        calls_by_job = {call.args[0]: call.kwargs for call in create_execution.call_args_list}
+        assert calls_by_job["overflow-due-job"] == {"source": "builtin"}
+        assert calls_by_job["ordinary-due-job"] == {
+            "source": "builtin",
+            "scheduled_for": "2026-08-10T03:55:23+00:00",
+        }
+        fired_jobs = {call.args[0]["id"]: call.args[0] for call in run_one.call_args_list}
+        assert fired_jobs["overflow-due-job"]["scheduled_for"] is None
+        assert fired_jobs["ordinary-due-job"]["scheduled_for"] == (
+            "2026-08-10T03:55:23+00:00"
+        )
+
     def test_tick_marks_empty_response_as_error(self, tmp_path):
         """When run_job returns success=True but final_response is empty,
         tick() should mark the job as error so last_status != 'ok'.

@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -47,6 +48,23 @@ from hermes_cli.fallback_config import get_fallback_chain
 from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_due_scheduled_for(value: Any) -> Optional[str]:
+    """Freeze an aware due instant in the execution ledger's UTC spelling."""
+    try:
+        instant = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        return None
+    try:
+        utc_instant = instant.astimezone(timezone.utc)
+    except OverflowError:
+        return None
+    if utc_instant.microsecond:
+        return None
+    return utc_instant.isoformat()
 
 
 def _set_cron_session_title(session_db, session_id, base_title):
@@ -4184,7 +4202,10 @@ def tick(
             logger.debug("Cron dispatch paused while gateway drains existing work")
             return 0
 
-        due_jobs = get_due_jobs()
+        due_jobs = [
+            dict(job, scheduled_for=_canonical_due_scheduled_for(job.get("next_run_at")))
+            for job in get_due_jobs()
+        ]
 
         if verbose and not due_jobs:
             logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
@@ -4273,8 +4294,15 @@ def tick(
                 _running_job_ids.add(job_id)
             # Record the attempt before executor dispatch. Recovery classifies
             # abandoned records as unknown; it never automatically retries them.
-            execution = create_execution(job_id, source="builtin")
-            dispatched_job = dict(job, execution_id=execution["id"])
+            execution_kwargs = {"source": "builtin"}
+            if job.get("scheduled_for"):
+                execution_kwargs["scheduled_for"] = job["scheduled_for"]
+            execution = create_execution(job_id, **execution_kwargs)
+            dispatched_job = dict(
+                job,
+                execution_id=execution["id"],
+                execution_source="builtin",
+            )
             _ctx = contextvars.copy_context()
 
             def _run_and_release(j=dispatched_job, ctx=_ctx):
