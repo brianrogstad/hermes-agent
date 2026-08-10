@@ -27,7 +27,7 @@ MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
-SCHEDULER_SOURCES = frozenset({"builtin", "chronos", "direct", "external"})
+_SCHEDULER_SOURCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CANONICAL_SCHEDULED_FOR_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$",
 )
@@ -50,8 +50,8 @@ def require_canonical_scheduled_for(value: Optional[str]) -> str:
 
 def require_scheduler_source(value: Any) -> str:
     source = str(value or "")
-    if source not in SCHEDULER_SOURCES:
-        raise ValueError("cron execution scheduler source is not allowlisted")
+    if not _SCHEDULER_SOURCE_RE.fullmatch(source):
+        raise ValueError("cron execution scheduler source is not a canonical provider id")
     return source
 
 
