@@ -236,6 +236,7 @@ Most platforms also accept an optional thread/topic as a third segment: `platfor
 |--------|--------|---------|
 | Origin chat | `origin` | Deliver to the chat where the job was created |
 | Local file | `local` | Save to `~/.hermes/cron/output/` |
+| Configured filesystem | `filesystem:<configured-id>` | Strict create-once copy; arbitrary paths are rejected |
 | Telegram | `telegram`, `telegram:<chat_id>`, `telegram:<chat_id>:<thread_id>`, `telegram:@username` | `telegram:-1001234567890:17585` |
 | Discord | `discord`, `discord:#channel`, `discord:<channel_id>`, `discord:<channel_id>:<thread_id>` | `discord:#engineering` |
 | Slack | `slack`, `slack:#channel`, `slack:<channel_id>`, `slack:<channel_id>:<thread_ts>` | `slack:#engineering` |
@@ -254,6 +255,22 @@ Most platforms also accept an optional thread/topic as a third segment: `platfor
 | QQ Bot | `qqbot` or `qqbot:<chat_id>` | Bare name delivers to QQ (Tencent) via Official API v2 |
 
 Platforms in the first group have explicit, validated target syntax — named channels (`#channel`), topics/threads, room/user IDs, group IDs, or phone numbers. The remaining platforms accept the generic `platform:<chat_id>` form (the value after the colon is used verbatim as the destination ID); a bare platform name always delivers to the home channel.
+
+Filesystem targets are a separate discriminated-union branch, never a fake
+platform. The scheduler resolves `filesystem:<id>` only from
+`cron.filesystem_delivery_targets`, freezes the exact typed authority and dated
+destination in the delivery execution, and branches before gateway config or
+adapter resolution. Successful evidence uses transport `filesystem`, no
+provider receipt, and an exact `hermes-filesystem-copy/v1` receipt binding the
+owning execution ID, canonical source, destination, SHA-256, size, byte equality,
+and replay status. Platform delivery continues to require `live` or
+`standalone` transport and a unique provider receipt ID.
+
+On restart, only filesystem-only in-flight deliveries are reconciled: an equal
+frozen destination terminalizes the same execution as delivered/reused, a
+missing destination resumes the same exclusive create-once copy, and a mismatch
+terminalizes as failed. Provider/platform executions retain the historical
+`unknown` classification and are never automatically retried.
 
 **Named channels** (`slack:#engineering`, `discord:#engineering`, or a friendly name like `slack:engineering`) are resolved against the channel directory the gateway builds from connected adapters, so the gateway must have discovered the channel for name resolution to succeed; raw IDs (`slack:C0123ABCD45`) always work.
 

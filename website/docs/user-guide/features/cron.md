@@ -269,8 +269,34 @@ When scheduling jobs, you specify where the output goes:
 | `"all"` | Fan out to every connected home channel | Resolved at fire time |
 | `"telegram,discord"` | Fan out to a specific set of channels | Comma-separated list |
 | `"origin,all"` | Deliver to the origin **plus** every other connected channel | Combine any tokens |
+| `"filesystem:ana-live"` | Copy one exact `MEDIA:` image to a named configured filesystem target | No arbitrary paths |
 
 The agent's final response is automatically delivered to the configured `deliver:` target — the agent does not send messages itself, so there is nothing to call in the cron prompt.
+
+### Configured filesystem targets
+
+Filesystem delivery is opt-in and registry-based. A job may contain only a
+token such as `filesystem:ana-live`; paths in `deliver` are rejected. The token
+is resolved at fire time exclusively through trusted `config.yaml`:
+
+```yaml
+cron:
+  filesystem_delivery_targets:
+    ana-live:
+      destination_root: /Users/me/Developer/ana-live
+      source_roots:
+        - /Users/me/Developer/Nano Images/ana-live
+      layout: ana-live-dated/v1
+```
+
+The destination root must already be a private, real, non-symlink directory.
+The `ana-live-dated/v1` layout accepts exactly one image under
+`YYYY/MM/DD/<filename>` or `YYYY/MM/DD/origin files/<filename>` and copies it to
+`destination_root/YYYY/MM/DD/<filename>`. Hermes writes private `0700`
+directories and a `0600` file, publishes without overwrite, and verifies exact
+bytes. Replaying the same execution reuses an equal destination; a different
+existing file fails closed. Filesystem and platform targets cannot be mixed in
+one job.
 
 ### Routing intent (`all`)
 
