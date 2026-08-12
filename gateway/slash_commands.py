@@ -2211,11 +2211,20 @@ class GatewaySlashCommandsMixin:
             try:
                 if "agent" not in config or not isinstance(config.get("agent"), dict):
                     config["agent"] = {}
-                config["agent"]["system_prompt"] = ""
+                overlay_mode = str(
+                    config["agent"].get("personality_selection_mode") or "replace"
+                ).strip().lower() == "overlay"
+                if overlay_mode:
+                    if "display" not in config or not isinstance(config.get("display"), dict):
+                        config["display"] = {}
+                    config["display"]["personality"] = "none"
+                else:
+                    config["agent"]["system_prompt"] = ""
                 atomic_config_write(config_path, config)
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
-            self._ephemeral_system_prompt = ""
+            if not overlay_mode:
+                self._ephemeral_system_prompt = ""
             return t("gateway.personality.cleared")
         elif args in personalities:
             new_prompt = _resolve_prompt(personalities[args])
@@ -2224,13 +2233,22 @@ class GatewaySlashCommandsMixin:
             try:
                 if "agent" not in config or not isinstance(config.get("agent"), dict):
                     config["agent"] = {}
-                config["agent"]["system_prompt"] = new_prompt
+                overlay_mode = str(
+                    config["agent"].get("personality_selection_mode") or "replace"
+                ).strip().lower() == "overlay"
+                if overlay_mode:
+                    if "display" not in config or not isinstance(config.get("display"), dict):
+                        config["display"] = {}
+                    config["display"]["personality"] = args
+                else:
+                    config["agent"]["system_prompt"] = new_prompt
                 atomic_config_write(config_path, config)
             except Exception as e:
                 return t("gateway.personality.save_failed", error=str(e))
 
-            # Update in-memory so it takes effect on the very next message.
-            self._ephemeral_system_prompt = new_prompt
+            # Replace mode owns the prompt; overlay mode leaves the baseline intact.
+            if not overlay_mode:
+                self._ephemeral_system_prompt = new_prompt
 
             return t("gateway.personality.set_to", name=args)
 

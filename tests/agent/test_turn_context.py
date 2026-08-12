@@ -179,6 +179,14 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_pre_llm_hook_receives_the_exact_active_system_prompt():
+    agent = _FakeAgent()
+    with patch("hermes_cli.plugins.invoke_hook", return_value=[]) as invoke:
+        _build(agent)
+
+    assert invoke.call_args.kwargs["active_system_prompt"] == "SYSTEM"
+
+
 def test_applies_agent_side_effects():
     agent = _FakeAgent()
     _build(agent)

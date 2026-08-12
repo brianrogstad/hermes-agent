@@ -56,6 +56,30 @@ class TestCLIPersonalityNone:
             cli._handle_personality_command("/personality helpful")
         assert cli.system_prompt == "You are helpful."
 
+    def test_overlay_mode_keeps_baseline_and_changes_only_selection(self):
+        cli = self._make_cli()
+        cli.system_prompt = "<live-card0>\nbaseline truth\n</live-card0>"
+        with patch(
+            "hermes_cli.cli_commands_mixin._load_personality_selection_mode",
+            return_value="overlay",
+        ), patch("cli.save_config_value", return_value=True) as save:
+            cli._handle_personality_command("/personality helpful")
+
+        assert cli.system_prompt == "<live-card0>\nbaseline truth\n</live-card0>"
+        save.assert_called_once_with("display.personality", "helpful")
+
+    def test_overlay_mode_none_keeps_baseline_and_clears_only_selection(self):
+        cli = self._make_cli()
+        cli.system_prompt = "<live-card0>\nbaseline truth\n</live-card0>"
+        with patch(
+            "hermes_cli.cli_commands_mixin._load_personality_selection_mode",
+            return_value="overlay",
+        ), patch("cli.save_config_value", return_value=True) as save:
+            cli._handle_personality_command("/personality none")
+
+        assert cli.system_prompt == "<live-card0>\nbaseline truth\n</live-card0>"
+        save.assert_called_once_with("display.personality", "none")
+
     def test_unknown_personality_shows_none_in_available(self, capsys):
         cli = self._make_cli()
         cli._handle_personality_command("/personality nonexistent")
@@ -117,6 +141,56 @@ class TestGatewayPersonalityNone:
             result = await runner._handle_personality_command(event)
 
         assert runner._ephemeral_system_prompt == ""
+
+    @pytest.mark.asyncio
+    async def test_overlay_mode_keeps_baseline_and_changes_only_selection(self, tmp_path):
+        runner = self._make_runner()
+        baseline = "<live-card0>\nbaseline truth\n</live-card0>"
+        runner._ephemeral_system_prompt = baseline
+        config_data = {
+            "display": {"personality": "none"},
+            "agent": {
+                "personality_selection_mode": "overlay",
+                "personalities": {"helpful": "You are helpful."},
+                "system_prompt": baseline,
+            },
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        with patch("gateway.run._hermes_home", tmp_path):
+            result = await runner._handle_personality_command(self._make_event("helpful"))
+
+        saved = yaml.safe_load(config_file.read_text())
+        assert "set" in result.lower()
+        assert runner._ephemeral_system_prompt == baseline
+        assert saved["agent"]["system_prompt"] == baseline
+        assert saved["display"]["personality"] == "helpful"
+
+    @pytest.mark.asyncio
+    async def test_overlay_mode_none_keeps_baseline_and_clears_only_selection(self, tmp_path):
+        runner = self._make_runner()
+        baseline = "<live-card0>\nbaseline truth\n</live-card0>"
+        runner._ephemeral_system_prompt = baseline
+        config_data = {
+            "display": {"personality": "helpful"},
+            "agent": {
+                "personality_selection_mode": "overlay",
+                "personalities": {"helpful": "You are helpful."},
+                "system_prompt": baseline,
+            },
+        }
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.dump(config_data))
+
+        with patch("gateway.run._hermes_home", tmp_path):
+            result = await runner._handle_personality_command(self._make_event("none"))
+
+        saved = yaml.safe_load(config_file.read_text())
+        assert "cleared" in result.lower()
+        assert runner._ephemeral_system_prompt == baseline
+        assert saved["agent"]["system_prompt"] == baseline
+        assert saved["display"]["personality"] == "none"
 
     @pytest.mark.asyncio
     async def test_list_includes_none(self, tmp_path):

@@ -39,6 +39,24 @@ from hermes_cli.browser_connect import (
 )
 
 
+def _load_personality_selection_mode() -> str:
+    """Return the configured personality ownership model.
+
+    ``replace`` preserves the historical behavior: selecting a personality
+    replaces ``agent.system_prompt``. ``overlay`` leaves that baseline prompt
+    untouched so a plugin can inject the selected personality ephemerally.
+    """
+    try:
+        from cli import CLI_CONFIG
+
+        return str(
+            (CLI_CONFIG.get("agent") or {}).get("personality_selection_mode")
+            or "replace"
+        ).strip().lower()
+    except Exception:
+        return "replace"
+
+
 class CLICommandsMixin:
     """Mixin holding the interactive-CLI slash-command handlers.
 
@@ -1019,23 +1037,33 @@ class CLICommandsMixin:
         if len(parts) > 1:
             # Set personality
             personality_name = parts[1].strip().lower()
+            overlay_mode = _load_personality_selection_mode() == "overlay"
             
             if personality_name in {"none", "default", "neutral"}:
-                self.system_prompt = ""
-                self.agent = None  # Force re-init
-                if save_config_value("agent.system_prompt", ""):
+                if overlay_mode:
+                    saved = save_config_value("display.personality", "none")
+                else:
+                    self.system_prompt = ""
+                    self.agent = None  # Force re-init
+                    saved = save_config_value("agent.system_prompt", "")
+                if saved:
                     print("(^_^)b Personality cleared (saved to config)")
                 else:
                     print("(^_^) Personality cleared (session only)")
                 print("  No personality overlay — using base agent behavior.")
             elif personality_name in self.personalities:
-                self.system_prompt = self._resolve_personality_prompt(self.personalities[personality_name])
-                self.agent = None  # Force re-init
-                if save_config_value("agent.system_prompt", self.system_prompt):
+                preview = self._resolve_personality_prompt(self.personalities[personality_name])
+                if overlay_mode:
+                    saved = save_config_value("display.personality", personality_name)
+                else:
+                    self.system_prompt = preview
+                    self.agent = None  # Force re-init
+                    saved = save_config_value("agent.system_prompt", self.system_prompt)
+                if saved:
                     print(f"(^_^)b Personality set to '{personality_name}' (saved to config)")
                 else:
                     print(f"(^_^) Personality set to '{personality_name}' (session only)")
-                print(f"  \"{self.system_prompt[:60]}{'...' if len(self.system_prompt) > 60 else ''}\"")
+                print(f"  \"{preview[:60]}{'...' if len(preview) > 60 else ''}\"")
             else:
                 print(f"(._.) Unknown personality: {personality_name}")
                 print(f"  Available: none, {', '.join(self.personalities.keys())}")
