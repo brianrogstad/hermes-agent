@@ -1170,6 +1170,7 @@ def build_turn_context(
 
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
+    _pre_llm_abort_reason = None
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -1199,6 +1200,11 @@ def build_turn_context(
             _spill_if_oversized = None  # type: ignore[assignment]
             _spill_config_cached = None
         for r in _pre_results:
+            if isinstance(r, dict) and r.get("abort") is True:
+                _pre_llm_abort_reason = str(
+                    r.get("reason") or "plugin_refused_turn"
+                ).strip()
+                break
             _piece: str = ""
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
@@ -1221,6 +1227,10 @@ def build_turn_context(
             plugin_user_context = "\n\n".join(_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
+    if _pre_llm_abort_reason:
+        raise RuntimeError(
+            f"pre_llm_call admission refused: {_pre_llm_abort_reason}"
+        )
 
     # Gateway must-deliver notes (auto-reset note, first-contact intro,
     # voice-channel change) ride the same user-message injection channel as

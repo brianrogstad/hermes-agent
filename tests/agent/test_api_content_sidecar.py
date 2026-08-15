@@ -246,6 +246,21 @@ def _stub_runtime_main():
 
 
 class TestPrologueStamping:
+    def test_pre_llm_abort_result_refuses_turn_before_context_build(self):
+        agent = _FakeAgent()
+        with patch(
+            "hermes_cli.plugins.invoke_hook",
+            return_value=[{
+                "abort": True,
+                "reason": "ana_response_authority_dormant",
+            }],
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="pre_llm_call admission refused: ana_response_authority_dormant",
+            ):
+                _build(agent)
+
     def test_stamps_api_content_from_plugin_context(self):
         agent = _FakeAgent()
         with patch(

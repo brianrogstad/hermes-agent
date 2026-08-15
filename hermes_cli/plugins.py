@@ -5084,7 +5084,9 @@ class PluginManager:
 
             {"context": "recalled text..."}
             "recalled text..."          # plain string, equivalent
+            {"abort": True, "reason": "authority unavailable"}
 
+        An explicit ``abort`` result refuses the turn before model admission.
         Context is ALWAYS injected into the user message, never the
         system prompt.  This preserves the prompt cache prefix — the
         system prompt stays identical across turns so cached tokens
