@@ -72,7 +72,10 @@ def _safe_parse_import_env(name: str, default: Any, converter, type_label: str):
 
 
 # Hard cap on foreground timeout; override via TERMINAL_MAX_FOREGROUND_TIMEOUT env var.
-FOREGROUND_MAX_TIMEOUT = _safe_parse_import_env("TERMINAL_MAX_FOREGROUND_TIMEOUT", 600, int, "integer")
+# Kept under the tool executor's 420s per-call deadline (agent/tool_executor.py,
+# tools.sequential_call) so an advertised foreground timeout can actually finish; anything
+# longer is promoted to a tracked background process instead of being killed mid-run.
+FOREGROUND_MAX_TIMEOUT = _safe_parse_import_env("TERMINAL_MAX_FOREGROUND_TIMEOUT", 400, int, "integer")
 
 # Disk usage warning threshold (in GB)
 DISK_USAGE_WARNING_THRESHOLD_GB = _safe_parse_import_env("TERMINAL_DISK_WARNING_GB", 500.0, float, "number")
