@@ -153,6 +153,19 @@ def _effective_watchdog_leash(runner: object) -> float:
     return effective_stop_watchdog_delay(runner, resolve_shutdown_watchdog_delay(effective_stop_drain_timeout(runner)))
 
 
+# LOCAL PATCH (restart-cron-ticker): stop admitting cron fires this long before the restart
+# wait's force-drain cap, so a job fired during the wait has time to finish.
+_RESTART_CRON_ADMISSION_MARGIN_S = 600.0
+
+
+def _running_cron_ids() -> set:
+    try:
+        from cron.scheduler import get_running_job_ids
+        return set(get_running_job_ids())
+    except Exception:
+        return set()
+
+
 class GatewayShutdownMixin:
     """Stop/drain/restart, scale-to-zero and active-work accounting methods for GatewayRunner."""
 
@@ -1578,25 +1591,59 @@ class GatewayShutdownMixin:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         last_status_at = 0.0
-        while self._awaitable_work_count() > 0:
-            now = loop.time()
-            if now >= deadline:
-                logger.warning(
-                    "Restart after-turn wait timed out after %.0fs with %d "
-                    "still active; proceeding to stop()/drain which may "
-                    "interrupt remaining work (#77184)", timeout, self._active_work_count(),
-                )
-                return False
-            if (now - last_status_at) >= 30.0:
-                logger.info(
-                    "Restart deferred: waiting on %d active work unit(s) "
-                    "(%d wedged and excluded; %.0fs remaining before force drain): %s",
-                    self._awaitable_work_count(), self._wedged_agent_count(), deadline - now,
-                    self._describe_active_work(),
-                )
-                self._scale_to_zero_status("draining", "restart wait: status mark failed")
-                last_status_at = now
-            await asyncio.sleep(0.1)
+        # LOCAL PATCH (restart-cron-ticker): keep cron firing on time during this wait. See
+        # gateway/restart_cron_gate.py. Admission closes once only cron fired during the wait is
+        # left (so the wait converges) or near the cap (so an admitted job is not force-drained).
+        gate = getattr(self, "_cron_dispatch_gate", None)
+        admission_margin = min(_RESTART_CRON_ADMISSION_MARGIN_S, timeout / 2.0)
+        pre_wait_cron = _running_cron_ids()
+        if gate is not None:
+            gate.open_restart_admission()
+
+        def _admission_tick(now: float) -> None:
+            if gate is None or not gate.restart_admission_open:
+                return
+            running = _running_cron_ids()
+            pre_wait_cron.intersection_update(running)
+            fired_during_wait = len(running - pre_wait_cron)
+            if self._awaitable_work_count() - fired_during_wait <= 0:
+                gate.close_restart_admission("pre-restart work finished")
+            elif deadline - now < admission_margin:
+                gate.close_restart_admission(
+                    "%.0fs left before the force-drain cap" % (deadline - now))
+
+        def _still_waiting() -> bool:
+            if self._awaitable_work_count() > 0:
+                return True
+            # A tick that passed the gate may not have registered its job yet.
+            return gate is not None and (gate.restart_admission_open or gate.holds_in_flight() > 0)
+
+        try:
+            while True:
+                _admission_tick(loop.time())
+                if not _still_waiting():
+                    break
+                now = loop.time()
+                if now >= deadline:
+                    logger.warning(
+                        "Restart after-turn wait timed out after %.0fs with %d "
+                        "still active; proceeding to stop()/drain which may "
+                        "interrupt remaining work (#77184)", timeout, self._active_work_count(),
+                    )
+                    return False
+                if (now - last_status_at) >= 30.0:
+                    logger.info(
+                        "Restart deferred: waiting on %d active work unit(s) "
+                        "(%d wedged and excluded; %.0fs remaining before force drain): %s",
+                        self._awaitable_work_count(), self._wedged_agent_count(), deadline - now,
+                        self._describe_active_work(),
+                    )
+                    self._scale_to_zero_status("draining", "restart wait: status mark failed")
+                    last_status_at = now
+                await asyncio.sleep(0.1)
+        finally:
+            if gate is not None:
+                gate.close_restart_admission("restart wait ended")
         if self._active_work_count() > 0:
             logger.warning(
                 "Restart deferred wait: %d wedged work unit(s) remain; "
