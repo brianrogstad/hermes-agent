@@ -36,6 +36,7 @@ def _tick_admitted(
     if lock_fd is None:
         return 0
 
+    _admission = contextlib.ExitStack()
     try:
         # `hermes pause` ESTOP: skip dispatch, never touch in-flight runs; check_paused logs once.
         with contextlib.suppress(ImportError):
@@ -43,7 +44,14 @@ def _tick_admitted(
             if _estop_check_paused("cron", _sched.logger):
                 return 0
 
-        if can_dispatch is not None and not can_dispatch():
+        # LOCAL PATCH (restart-cron-ticker): a gate with ``hold()`` stays held until the due jobs
+        # are in the running-job ledger, so a restart wait cannot finish between check and submit.
+        _hold = getattr(can_dispatch, "hold", None)
+        if callable(_hold):
+            if not _admission.enter_context(_hold()):
+                _sched.logger.debug("Cron dispatch paused while gateway drains existing work")
+                return 0
+        elif can_dispatch is not None and not can_dispatch():
             _sched.logger.debug("Cron dispatch paused while gateway drains existing work")
             return 0
 
@@ -118,4 +126,5 @@ def _tick_admitted(
         _sched._sweep_mcp_orphans_when_all_done(_all_futures)
         return sum(_results)
     finally:
+        _admission.close()
         _sched._release_tick_lock(lock_fd)
