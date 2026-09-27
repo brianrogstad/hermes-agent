@@ -831,7 +831,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         try:
             file_size = int(_strip_terminal_fence_leaks(size_seg).strip())
         except ValueError:
-            file_size = 0
+            # No byte count is not a zero byte count: re-ask one probe at a time
+            # rather than let an unparseable size render a nonempty file as empty.
+            logger.debug(
+                "read_file: compound probe for %s has unparseable size %r; "
+                "falling back to sequential probes", path, size_seg[-40:])
+            return self._read_file_sequential(path, offset, limit)
 
         # Byte-layer binary detection when base64 was available, else the legacy
         # text heuristic over a plain sample (one extra round-trip, shells without base64).
@@ -1040,6 +1045,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             return self._not_regular_error(path)
         if status not in ("ok", "bad_size"):
             return self._env_unavailable_error(path, status)
+        if status == "bad_size":
+            # ``[ -f ]`` passed, so the file exists; an exit-0 reply with no parseable
+            # ``wc -c`` means the transport lost or garbled stdout. Reporting size 0
+            # here told the model a nonempty file was empty ("File is empty (0 bytes)").
+            return ReadResult(error=(
+                f"Could not determine the size of {path}: the shell returned no usable "
+                "byte count (stdout lost or garbled). The file exists; this is not an "
+                "empty file. Retry, or verify with an independent read."))
         if self._is_image(path):  # never inlined — redirect to the vision tool
             return self._image_redirect_result(file_size)
         is_binary, sample_bytes = self._detect_binary(path)
