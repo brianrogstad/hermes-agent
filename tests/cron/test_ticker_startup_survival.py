@@ -8,6 +8,10 @@ import threading
 import time
 from unittest.mock import patch
 
+# Imported at module scope, before the per-test home-I/O guard is armed: gateway.run's bootstrap
+# stats the checkout's sibling manifest.json, which on the default install sits in the real home.
+import gateway.run as gateway_run
+
 
 def _wait_until(predicate, timeout=10.0, interval=0.005):
     deadline = time.monotonic() + timeout
@@ -74,7 +78,6 @@ def test_multiplex_ticker_survives_a_raising_gate_without_ticking_ungated(tmp_pa
 def test_housekeeping_restarts_a_dead_ticker(monkeypatch):
     """The supervisor is the outer layer: a ticker that ended without a stop request is respawned
     on the next housekeeping tick; one that ended BECAUSE of the stop request is not."""
-    import gateway.run as gateway_run
     from cron.scheduler_thread import SupervisedTickerThread
 
     class _OneTick:
