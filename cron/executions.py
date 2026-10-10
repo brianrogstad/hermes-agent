@@ -344,6 +344,29 @@ _OWNER_WEDGED_REASON = (
     "treated as wedged (#115692). The process was not terminated; whether side effects "
     "ran is unknown."
 )
+_OWN_RUN_EXITED_REASON = (
+    "This process's in-process run of the job ended without a durable terminal state "
+    "(its finish never reached the ledger, e.g. the disk filled while saving output) and "
+    "the row outlived the derived stale bound; whether side effects ran is unknown."
+)
+
+
+def _in_flight_in_this_process(job_id: str) -> bool:
+    """True unless this process can prove it has no in-flight run of ``job_id``.
+
+    In-process runs register in the scheduler's running set before the row turns
+    ``running`` and leave it only after their terminal write was attempted
+    (``run_one_job``'s ``finally``), so absence from that set means the run is over.
+    Same signal and fail-closed shape as ``cron.jobs`` stale one-shot recovery.
+    """
+    try:
+        from cron.scheduler import is_job_running
+        return is_job_running(job_id)
+    except Exception:
+        logger.warning(
+            "Cron running-set liveness check failed for job %r; keeping its running "
+            "execution row", job_id, exc_info=True)
+        return True
 
 
 def settle_unstarted_execution(execution_id: str, job_id: str, error: str) -> None:
@@ -358,8 +381,9 @@ def settle_unstarted_execution(execution_id: str, job_id: str, error: str) -> No
 
 def recover_interrupted_executions() -> int:
     """Mark abandoned attempts unknown without scheduling retries: rows whose owner is provably
-    dead, plus rows whose live owner holds a claim older than the derived stale bound (the
-    process is not killed)."""
+    dead, rows whose live owner holds a claim older than the derived stale bound (the
+    process is not killed), and this process's own ``running`` rows whose run has already
+    left the in-flight set and that outlived the same bound."""
     now = _hermes_now().isoformat()
     changed = 0
     recovered: list[dict[str, Any]] = []
@@ -370,15 +394,33 @@ def recover_interrupted_executions() -> int:
     with _transaction() as conn:
         rows = conn.execute(
             """SELECT id, status, process_id, pid, process_started_at,
-                      handoff_pending, handoff_started_at, claimed_at, progress_at
+                      handoff_pending, handoff_started_at, claimed_at, progress_at, job_id
                FROM executions
                WHERE status IN ('claimed','running')"""
         ).fetchall()
         for row in rows:
-            if row["process_id"] == _PROCESS_ID:
-                continue
             reason = _OWNER_GONE_REASON
-            if _owner_is_live(int(row["pid"]), row["process_started_at"]):
+            if row["process_id"] == _PROCESS_ID:
+                # This process's own in-process run. Its run thread is the only writer of the
+                # terminal row, so a run still in flight is never touched. But when that thread
+                # has already left the running set without its finish reaching the ledger (the
+                # disk filled while saving output, 2026-10-09), the owner pid is this live
+                # gateway: the dead-owner check below can never fire, and the row stays
+                # ``running`` until a restart. Release it only when both hold: no run of the
+                # job is in flight here, and the row has been silent past the derived bound.
+                # ``claimed`` rows may still be queued for a pool slot and are left alone.
+                if row["status"] != "running" or _in_flight_in_this_process(row["job_id"]):
+                    continue
+                if not stale_after_resolved:
+                    stale_after = _live_owner_stale_after_seconds()
+                    stale_after_resolved = True
+                if (
+                    stale_after is None
+                    or _stale_age_seconds(row["claimed_at"], row["progress_at"]) <= stale_after
+                ):
+                    continue
+                reason = _OWN_RUN_EXITED_REASON
+            elif _owner_is_live(int(row["pid"]), row["process_started_at"]):
                 # A live owner is normally a legitimately running job. A worker permanently
                 # deadlocked (e.g. futex_wait behind a route/proxy flip, #115692) also passes
                 # this check, so a claim SILENT for longer than the derived bound is treated
@@ -388,7 +430,7 @@ def recover_interrupted_executions() -> int:
                 # the agent is active), so a healthy multi-hour run is never reclaimed while
                 # it is still working. The wedged worker PROCESS is NOT terminated here
                 # (leaked until host restart); rows owned by this process (process_id ==
-                # _PROCESS_ID, in-process runs) are skipped above and remain out of scope.
+                # _PROCESS_ID, in-process runs) are handled in the branch above.
                 if not stale_after_resolved:
                     stale_after = _live_owner_stale_after_seconds()
                     stale_after_resolved = True
