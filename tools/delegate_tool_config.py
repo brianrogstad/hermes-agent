@@ -148,6 +148,25 @@ def _get_child_timeout() -> Optional[float]:
         "delegation.child_timeout_seconds=%r is not a valid number; using default (no timeout)",
     )
 
+# Per-process, opt-in WALL-CLOCK deadline for each delegated child (seconds from that child's start). Read ONLY from
+# this process's environment, never from config.yaml or ``_knob``, so a launcher can bound its own children without
+# changing delegation for any other session. The routine scheduler sets it for one routine's doer from that routine's
+# manifest (``doer.lane_deadline_seconds``). Unlike ``child_timeout_seconds`` it does not reset on activity: a child
+# stuck on a stream that keeps ticking its activity clock but never completes is still stopped at the deadline.
+CHILD_WALL_DEADLINE_ENV = "HERMES_DELEGATION_CHILD_WALL_DEADLINE_SECONDS"
+
+def _get_child_wall_deadline() -> Optional[float]:
+    """Seconds from the env override, or None (default) when unset, empty, non-numeric or <= 0."""
+    raw = (os.environ.get(CHILD_WALL_DEADLINE_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; no wall-clock deadline applied", CHILD_WALL_DEADLINE_ENV, raw)
+        return None
+    return value if value > 0 else None
+
 def _get_max_spawn_depth() -> int:
     """delegation.max_spawn_depth floored at 1 (no ceiling). Depth 0 is the parent; agents at depths 0..N-1 may spawn,
     depth N is the leaf floor. Default 1 is flat. Each extra level multiplies API cost."""

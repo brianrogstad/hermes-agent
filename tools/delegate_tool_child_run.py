@@ -787,7 +787,10 @@ class _ChildRun:
         """Close steer acceptance (see ``_merge_late_steer``); returns late steer text, if any."""
         return _close_subagent_steering(self.subagent_id, self.child) if self.subagent_id else None
 
-    def wait_liveness_aware(self, settled: threading.Event, child_future: Any, child_timeout: Optional[float]) -> None:
+    def wait_liveness_aware(
+        self, settled: threading.Event, child_future: Any, child_timeout: Optional[float],
+        wall_deadline: Optional[float] = None,
+    ) -> None:
         """Wait for the worker or the stale verdict, where ``child_timeout`` bounds INACTIVITY, not total runtime.
 
         A configured cap used to be a dispatch-to-death stopwatch, so it only ever killed children the runtime had
@@ -796,10 +799,18 @@ class _ChildRun:
         ticks during the wait and the request is bounded by the per-call stale watchdog — so the budget restarts on
         every sign of progress, exactly the signals the heartbeat's stale verdict reads. Genuinely frozen children
         keep two authorities: this budget (when configured) and the heartbeat's stale threshold.
+
+        ``wall_deadline`` (absolute ``time.monotonic()``; None unless the process opted in through
+        ``HERMES_DELEGATION_CHILD_WALL_DEADLINE_SECONDS``) is a third, independent bound that progress never resets.
         """
-        if child_timeout is None:
+        if child_timeout is None and wall_deadline is None:
             settled.wait()
             return
+        if child_timeout is None:
+            while (remaining := wall_deadline - time.monotonic()) > 0:
+                if settled.wait(timeout=remaining):
+                    return
+            return  # wall-clock deadline reached
         deadline = time.monotonic() + child_timeout
         warn_at = deadline - child_timeout * (1.0 - _BUDGET_WARNING_FRACTION)
         warned = False
@@ -809,6 +820,10 @@ class _ChildRun:
             remaining = deadline - now
             if remaining <= 0:
                 return  # no progress for the whole budget
+            if wall_deadline is not None:
+                if now >= wall_deadline:
+                    return  # wall-clock deadline reached
+                remaining = min(remaining, wall_deadline - now)
             wait = min(_LIVENESS_POLL_SECONDS, remaining)
             if not warned:
                 wait = min(wait, max(warn_at - now, 0.0))
@@ -838,10 +853,15 @@ class _ChildRun:
         via a Future done-callback (``close_deferred=True``) — closing here would race its still-unwinding finally
         path.
         """
-        from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
+        from tools.delegate_tool import (
+            _get_child_timeout, _get_child_wall_deadline, _get_subagent_approval_callback, _set_subagent_approval_cb,
+        )
         from tools.daemon_pool import DaemonThreadPoolExecutor
         child, task_index = self.child, self.task_index
         child_timeout = _get_child_timeout()
+        # Opt-in per-process wall-clock bound (None unless the launcher set the env override).
+        wall_seconds = _get_child_wall_deadline()
+        wall_deadline = time.monotonic() + wall_seconds if wall_seconds is not None else None
         executor = DaemonThreadPoolExecutor(
             max_workers=1, initializer=_set_subagent_approval_cb, initargs=(_get_subagent_approval_callback(),),
         )
@@ -868,10 +888,14 @@ class _ChildRun:
         future.add_done_callback(lambda _f: settled.set())
         # Set when the stale verdict — not the configured cap — ended the wait; the entry must name that cause.
         stale_after: Optional[float] = None
+        # Set when the opt-in wall-clock deadline ended the wait.
+        wall_after: Optional[float] = None
         try:
-            self.wait_liveness_aware(settled, future, child_timeout)
+            self.wait_liveness_aware(settled, future, child_timeout, wall_deadline)
             if not future.done():
                 stale_after = getattr(self.heartbeat, "stale_threshold_seconds", None)
+                if stale_after is None and wall_deadline is not None and time.monotonic() >= wall_deadline:
+                    wall_after = wall_seconds
                 raise FuturesTimeoutError()
             return future.result(), None, False
         except Exception as wait_exc:
@@ -884,7 +908,7 @@ class _ChildRun:
         _signal_child_stop(child)
         is_timeout = isinstance(exc, (FuturesTimeoutError, TimeoutError))
         # What actually ended the wait: the stale threshold pre-empts a longer configured cap.
-        timeout_cause = stale_after if stale_after is not None else child_timeout
+        timeout_cause = stale_after if stale_after is not None else wall_after if wall_after is not None else child_timeout
         duration = self.elapsed()
         logger.warning("Subagent %d %s after %.1fs", task_index, "timed out" if is_timeout else f"raised {type(exc).__name__}", duration)
         child_api_calls = 0
@@ -908,6 +932,11 @@ class _ChildRun:
             _err = (
                 f"Subagent stopped making progress after {child_api_calls} API call(s) — no activity for "
                 f"{stale_after:g}s (heartbeat stale threshold); the pending worker was abandoned."
+            )
+        elif wall_after is not None:
+            _err = (
+                f"Subagent passed its {wall_after:g}s wall-clock deadline with {child_api_calls} API call(s) completed "
+                f"and was stopped; its pending worker was abandoned. Finished sibling tasks are unaffected."
             )
         elif before_first_call:
             _err = (
@@ -935,6 +964,8 @@ class _ChildRun:
             "_child_role": getattr(child, "_delegate_role", None),
             "diagnostic_path": diagnostic_path,
         }
+        if wall_after is not None:
+            _error_entry["wall_clock_deadline"] = True
         self.finish_failed(_error_entry, _late_pending_steer, preview=f"Timed out after {duration}s" if is_timeout else str(exc))
         close_deferred = is_timeout and not future.done()
         if close_deferred:
