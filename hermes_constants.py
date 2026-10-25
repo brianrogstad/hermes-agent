@@ -738,7 +738,7 @@ def apply_subprocess_home_env(env: MutableMapping[str, str]) -> None:
 # own venv per campaign lane) sat for three days and filled the disk.
 SCRATCH_TMP_ENV_VARS = ("TMPDIR", "TMP", "TEMP")
 SCRATCH_DIR_MARKER_ENV = "HERMES_SCRATCH_DIR"
-SCRATCH_MAX_IDLE_HOURS = 24
+SCRATCH_MAX_IDLE_HOURS = 6
 _SCRATCH_PRUNE_STAMP = ".last_prune"
 _SCRATCH_PRUNE_INTERVAL_SECONDS = 3600
 _scratch_pruned_once = False

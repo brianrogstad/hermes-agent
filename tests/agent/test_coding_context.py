@@ -157,6 +157,19 @@ class TestProjectFacts:
         assert facts.verify_commands == ["pnpm run test"]  # dev excluded
         assert facts.context_files == []
 
+    def test_package_json_placeholder_test_script_is_not_verify_command(self, tmp_path):
+        _git_init(tmp_path)
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"test": "echo \"Error: no test specified\" && exit 1"}})
+        )
+
+        facts = cc.detect_project_facts(tmp_path)
+        block = cc.build_coding_workspace_block(tmp_path)
+
+        assert facts.verify_commands == []
+        assert "npm run test" not in block
+        assert "Verify:" not in block
+
     def test_project_facts_for_matches_prompt_block(self, tmp_path):
         # Invariant: the structured facts the UI consumes must not drift from the
         # commands the prompt snapshot renders — one detector feeds both.

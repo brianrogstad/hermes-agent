@@ -315,6 +315,16 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         }
       }
 
+      // Ana mood: classify Brian's live message without delaying or risking the
+      // real send. Neutral messages are ignored by the local brain API.
+      if (visibleText) {
+        void fetch('http://localhost:3000/api/brain/brian-message-stimulus', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: visibleText, surface: 'hermes', dry_run: false })
+        }).catch(() => {})
+      }
+
       // Pin the foreground session context for the whole async submit pipeline.
       // Without this, a fast session switch during session.resume / file.attach
       // can redirect the user's text into a different chat (#54527). Mutable —

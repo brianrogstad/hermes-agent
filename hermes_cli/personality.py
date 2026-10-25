@@ -15,6 +15,14 @@ from typing import Any, Dict, Optional, Tuple
 #: Names that mean "no personality overlay".
 NEUTRAL_PERSONALITY_NAMES = frozenset({"", "none", "default", "neutral"})
 
+#: The overlay a session defaults to when nothing is selected. Ana is
+#: Unwritten Co.'s simulated person; every entry path should boot her live
+#: overlay rather than a bare, personality-less agent. Applies only when the
+#: name is actually defined in the config, so a stock Hermes install keeps the
+#: original empty-selection behavior. Recorded as a vendored patch under
+#: projects/unwritten-ops/specs/hermes-patch-persistence/persona-default-resolve/.
+DEFAULT_PERSONALITY_NAME = "ana-right-now"
+
 #: Built-in personalities, available on every surface without any config.
 BUILTIN_PERSONALITIES: Dict[str, str] = {
     "helpful": "You are a helpful, friendly AI assistant.",
@@ -116,11 +124,19 @@ def active_personality_name(cfg: Optional[Dict[str, Any]]) -> str:
 
 
 def resolve_ephemeral_system_prompt(cfg: Optional[Dict[str, Any]]) -> str:
-    """Session overlay: ``display.personality`` when it names a known personality, else the
-    user-owned ``agent.system_prompt``. Callers still prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT``."""
+    """Session overlay: ``display.personality`` when it names a known personality. When nothing
+    is selected (empty/neutral, or a name no longer defined) a fresh session still boots "in
+    that mode": the selection defaults to ``DEFAULT_PERSONALITY_NAME`` whenever that overlay is
+    defined (Brian, 2026-09-02 — see
+    ``projects/unwritten-ops/specs/hermes-patch-persistence/persona-default-resolve/``). Only
+    when the default overlay is absent does the user-owned ``agent.system_prompt`` apply.
+    Callers still prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT``."""
     name = active_personality_name(cfg)
     if name:
         return render_personality_prompt(available_personalities(cfg)[name])
+    personalities = available_personalities(cfg)
+    if DEFAULT_PERSONALITY_NAME in personalities:
+        return render_personality_prompt(personalities[DEFAULT_PERSONALITY_NAME])
     return prompt_text(_get(cfg, "agent", "system_prompt", default=""))
 
 

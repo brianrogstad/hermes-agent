@@ -1,11 +1,6 @@
-"""Start-time fingerprint drift between claim and recovery reads (#117505).
+"""Legacy clock drift cannot prove owner death while its PID still exists.
 
-``_owner_is_live()`` used to require the recomputed start-time fingerprint to be exactly
-equal to the one recorded at claim time. On hosts where same-host readings drift by ~1 s
-(macOS ``kern.boottime`` adjustment), every long-running execution was reconciled to
-``unknown`` while its process was still alive and healthy. A mismatch is now treated as
-inconclusive within a small tolerance — a recycled PID is still reaped, an unreadable
-reading is still fail-safe.
+Native negative birth fingerprints are covered by test_owner_native_reconciliation.
 """
 
 from __future__ import annotations
@@ -42,12 +37,11 @@ def _status(execution_id: str) -> str:
     "drift,expect_live",
     [
         (100, True),  # 1 s drift: the reported macOS boot-time step (#117505)
-        (3600, False),  # PID-reuse scale
+        (3600, True),  # legacy clock drift cannot prove PID reuse
     ],
 )
-def test_drift_within_tolerance_keeps_execution_running(monkeypatch, drift, expect_live):
-    """Recovery only reaps a claimed/running row when the recomputed fingerprint is far from
-    the claim-time one, not merely unequal to it."""
+def test_legacy_drift_keeps_execution_running(monkeypatch, drift, expect_live):
+    """Legacy fingerprints retain ownership regardless of observer clock drift."""
     claimed = 178864182760  # the exact reading from the report
     execution_id = _seed_external_running(monkeypatch, claimed_start_time=claimed)
     monkeypatch.setattr(executions_mod, "_process_start_time", lambda pid: claimed + drift)

@@ -146,7 +146,8 @@ function pickCopy(copies: IntroCopy[], seed = 0): IntroCopy {
   return copies[Math.abs(seed) % copies.length] || FALLBACK_COPY[0]
 }
 
-const WORDMARK = 'HERMES AGENT'
+const WORDMARK = 'ANASTASIA STERLING'
+const ANA_INTRO = 'What are we fixing that you definitely did not break?'
 
 function resolveCopy(personality?: string, seed?: number): IntroCopy {
   const personalityKey = normalizeKey(personality)
@@ -178,7 +179,7 @@ export function Intro({ personality, seed }: IntroProps) {
       <div className="w-full min-w-0">
         <Wordmark className="mb-1" text={WORDMARK} />
 
-        <p className="m-0 text-center leading-normal tracking-tight">{body}</p>
+        <p className="m-0 text-center leading-normal tracking-tight">{ANA_INTRO}</p>
       </div>
     </div>
   )

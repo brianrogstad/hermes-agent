@@ -13,6 +13,7 @@ import { $wakeWord, toggleWakeWord } from '@/store/wake-word'
 import { ACTIVE_ICON_BTN, GHOST_ICON_BTN, PRIMARY_ICON_BTN } from './control-classes'
 import type { ConversationStatus } from './hooks/use-voice-conversation'
 import { ModelPill } from './model-pill'
+import { PersonalityPill } from './personality-pill'
 import { ReasoningPill } from './reasoning-pill'
 import { StartVoiceButton } from './start-voice-button'
 import type { ChatBarState, VoiceStatus } from './types'
@@ -118,6 +119,9 @@ export function ComposerControls({
         <>
           {hideModelPill ? null : (
             <>
+              {/* Local patch (hermes-patch-persistence/composer-personality-picker):
+                  personality pill sits left of the model pill. */}
+              {compactModelPill ? null : <PersonalityPill disabled={disabled} />}
               <ModelPill compact={compactModelPill} disabled={disabled} model={state.model} />
               {compactModelPill ? null : <ReasoningPill disabled={disabled} model={state.model} />}
             </>

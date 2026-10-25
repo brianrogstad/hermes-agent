@@ -525,6 +525,21 @@ def delegate_task(
     )
     if err:
         return tool_error(err)
+    # TeamRunner stages record allowlisted dispatch admission; the synchronous
+    # resweep parent's children are bound in runtime custody before any batch
+    # execution. Outside TeamRunner nothing is imported or recorded.
+    if os.environ.get("ROUTINE_TEAM_RUN") == "1":
+        try:
+            from tools.resweep_dispatch_checkpoint import admit_prejoin
+            refusal = admit_prejoin(children, parent_agent, live_deleg_id, live_paths)
+        except Exception as exc:
+            refusal = (f"Resweep prejoin checkpoint refused: {type(exc).__name__}"
+                       if os.environ.get("ROUTINE_TEAM_ROUTINE") == "resweep-rotation" else None)
+        if refusal:
+            for _, _, child in children:
+                with _quiet("prejoin checkpoint refusal: child cleanup failed"):
+                    child.close()
+            return tool_error(refusal)
     batch = _Batch(
         task_list, children, parent_agent, creds, context, top_role, max_children,
         live_deleg_id, live_writers, live_paths, *origin, overall_start,

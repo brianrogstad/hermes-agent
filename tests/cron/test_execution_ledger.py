@@ -246,6 +246,66 @@ def test_recovery_does_not_mark_live_process_execution_unknown(monkeypatch, tmp_
     assert executions.latest_execution("still-live")["status"] == "running"
 
 
+def _own_running_row_aged(monkeypatch, tmp_path, *, in_flight, age_seconds, bound=7200.0):
+    """An in-process run this gateway owns, claimed ``age_seconds`` ago with no progress since.
+
+    The 2026-10-09 shape: the run's finish never reached the ledger (disk full while saving
+    output), so the row stayed ``running`` under the live gateway's own process id.
+    """
+    import cron.scheduler as scheduler
+    from datetime import timedelta
+
+    executions = _point_ledger(monkeypatch, tmp_path)
+    record = executions.create_execution("lost-finish", source="builtin")
+    executions.mark_execution_running(record["id"])
+    then = (executions._hermes_now() - timedelta(seconds=age_seconds)).isoformat()
+    with sqlite3.connect(executions.EXECUTIONS_FILE) as conn:
+        conn.execute(
+            "UPDATE executions SET claimed_at=? WHERE id=?", (then, record["id"]))
+    monkeypatch.setattr(executions, "_live_owner_stale_after_seconds", lambda: bound)
+    monkeypatch.setattr(
+        scheduler, "is_job_running",
+        in_flight if callable(in_flight) else (lambda job_id, home=None: in_flight))
+    return executions
+
+
+def test_own_running_row_whose_run_ended_is_recovered_after_the_bound(monkeypatch, tmp_path):
+    executions = _own_running_row_aged(monkeypatch, tmp_path, in_flight=False, age_seconds=7300)
+
+    assert executions.recover_interrupted_executions() == 1
+    row = executions.latest_execution("lost-finish")
+    assert row["status"] == "unknown"
+    assert row["error"] == executions._OWN_RUN_EXITED_REASON
+
+
+def test_own_running_row_still_in_flight_is_never_recovered(monkeypatch, tmp_path):
+    executions = _own_running_row_aged(monkeypatch, tmp_path, in_flight=True, age_seconds=7300)
+
+    assert executions.recover_interrupted_executions() == 0
+    assert executions.latest_execution("lost-finish")["status"] == "running"
+
+
+def test_own_running_row_inside_the_bound_is_not_recovered(monkeypatch, tmp_path):
+    executions = _own_running_row_aged(monkeypatch, tmp_path, in_flight=False, age_seconds=600)
+
+    assert executions.recover_interrupted_executions() == 0
+    assert executions.latest_execution("lost-finish")["status"] == "running"
+
+
+def test_own_running_row_kept_when_no_bound_or_liveness_unreadable(monkeypatch, tmp_path):
+    executions = _own_running_row_aged(
+        monkeypatch, tmp_path, in_flight=False, age_seconds=7300, bound=None)
+    assert executions.recover_interrupted_executions() == 0
+
+    def unreadable(job_id, home=None):
+        raise RuntimeError("running set unavailable")
+
+    executions = _own_running_row_aged(
+        monkeypatch, tmp_path / "b", in_flight=unreadable, age_seconds=7300)
+    assert executions.recover_interrupted_executions() == 0
+    assert executions.latest_execution("lost-finish")["status"] == "running"
+
+
 def test_restart_marks_interrupted_execution_unknown_without_requeue(tmp_path):
     """Real temp-HERMES_HOME subprocess restart: in-flight is audit-only unknown."""
     home = tmp_path / "home"

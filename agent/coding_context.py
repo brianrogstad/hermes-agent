@@ -57,6 +57,7 @@ _JS_LOCKFILES = (
 _VERIFY_TARGETS = ("test", "tests", "lint", "typecheck", "check", "build", "fmt", "format")
 _MAX_VERIFY_COMMANDS = 8
 _MAX_FACT_FILE_BYTES = 256 * 1024
+_PLACEHOLDER_NPM_SCRIPT_PATTERNS = ("error: no test specified", "no test specified")
 _GIT_TIMEOUT = 2.5
 # Per-model edit-format steering toward the `patch` mode each family was trained on (unknown
 # families get nothing). GPT/Codex get V4A for ALL edits incl. single-file: codex-rs ships
@@ -453,6 +454,16 @@ def _read_small(path: Path) -> str:
         return ""
 
 
+def _is_placeholder_verify_script(name: str, script: Any) -> bool:
+    """Return True for package-manager scaffold scripts that are not real checks."""
+    if name != "test" or not isinstance(script, str):
+        return False
+    lowered = script.strip().lower()
+    if not lowered:
+        return True
+    return any(pattern in lowered for pattern in _PLACEHOLDER_NPM_SCRIPT_PATTERNS)
+
+
 @dataclass(frozen=True)
 class ProjectFacts:
     """Structured project facts — exposed so non-prompt consumers (desktop verify UI) don't re-detect."""
@@ -474,7 +485,11 @@ def detect_project_facts(root: Path) -> ProjectFacts:
         except (json.JSONDecodeError, AttributeError):
             scripts = {}
         js_pm = next((pm for lock, pm in _JS_LOCKFILES if (root / lock).is_file()), "npm")
-        verify.extend(f"{js_pm} run {name}" for name in _VERIFY_TARGETS if name in scripts)
+        verify.extend(
+            f"{js_pm} run {name}"
+            for name in _VERIFY_TARGETS
+            if name in scripts and not _is_placeholder_verify_script(name, scripts.get(name))
+        )
     if (root / "pytest.ini").is_file() or "[tool.pytest" in _read_small(root / "pyproject.toml"):
         verify.append("pytest")
     makefile = _read_small(root / "Makefile")

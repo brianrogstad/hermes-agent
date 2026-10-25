@@ -345,6 +345,19 @@ class CLIChatTurnMixin:
         _persist_clean_user_message = message if (turn.voice_prefix or agent_message != message) else None
         _one_turn_model_restore = getattr(self, "_pending_one_turn_model_restore", None)
         self._pending_one_turn_model_restore = None
+        # [live-persona-deal] Re-resolve the dealt persona card before each turn — the
+        # heartbeat re-writes the seated persona every beat (one-card personality).
+        # Mirrors the TUI-gateway hook; mtime-cached read, silent attribute update, empty
+        # value left alone so /personality none keeps working via its own path.
+        try:
+            from hermes_cli.config import load_config_readonly as _lpd_cfg
+            _lpd_prompt = str((_lpd_cfg().get("agent") or {}).get("system_prompt") or "").strip()
+            if (_lpd_prompt and self.agent is not None
+                    and _lpd_prompt != (getattr(self.agent, "ephemeral_system_prompt", None) or "")):
+                self.agent.ephemeral_system_prompt = _lpd_prompt
+                self.system_prompt = _lpd_prompt
+        except Exception:
+            pass
         try:
             from agent.notification_presentation import notification_turn
             muted = getattr(turn, "mute_notification_reply", False)

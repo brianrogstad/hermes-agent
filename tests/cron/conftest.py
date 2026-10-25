@@ -11,6 +11,15 @@ edge cases — call ``monkeypatch.delenv("HERMES_MODEL", raising=False)``
 inside the test, which overrides this fixture's value for that scope.
 """
 
+# Bootstrap is process initialization, not part of an individual cron job.
+# Run it during collection, after the root conftest sandboxes HERMES_HOME but
+# before its per-test real-home I/O guard is installed. Installed source trees
+# can live under ~/.hermes: PM must inspect their adjacent payload manifest.
+# Delaying this import until patch("run_agent.AIAgent") probes that install
+# metadata inside the test guard, failing before the scheduler is exercised.
+# Keep the guard unchanged for every actual test (as in tests/tui_gateway).
+import hermes_bootstrap  # noqa: F401
+
 import pytest
 
 

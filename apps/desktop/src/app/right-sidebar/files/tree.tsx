@@ -125,8 +125,20 @@ export function ProjectTree({
         await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)))
       }
 
+      const targetNode = treeRef.current?.get(target)
+
+      if (targetNode?.data?.isDirectory) {
+        if (targetNode.data.children === undefined) {
+          await onLoadChildren(target)
+        }
+
+        onNodeOpenChange(target, true)
+        treeRef.current?.open(target)
+        await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)))
+      }
+
       treeRef.current?.select(target)
-      // 'start' lands the file at/near the top (instant — arborist sets scrollTop
+      // 'start' lands the file/folder at/near the top (instant — arborist sets scrollTop
       // directly, no smooth scroll).
       treeRef.current?.scrollTo(target, 'start')
     },

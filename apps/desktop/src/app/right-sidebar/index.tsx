@@ -10,7 +10,7 @@ import { useDelayedTrue } from '@/hooks/use-delayed-true'
 import { useI18n } from '@/i18n'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { cn } from '@/lib/utils'
-import { $panesFlipped } from '@/store/layout'
+import { $panesFlipped, revealFileInTree } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
 import { openPreview } from '@/store/preview'
 import { openFolderAsProject } from '@/store/projects'
@@ -18,6 +18,7 @@ import { $currentCwd, $selectedStoredSessionId, $workspaceCwdOwner } from '@/sto
 
 import { SidebarPanelLabel } from '../shell/sidebar-label'
 
+import { visiblePinnedFolders } from './files/pinned-folders'
 import { ProjectTree } from './files/tree'
 import { useProjectTree } from './files/use-project-tree'
 
@@ -213,6 +214,7 @@ function FilesystemTab({
           </Button>
         </Tip>
       </RightSidebarSectionHeader>
+      <PinnedFolderShortcuts cwd={cwd} />
       <FileTreeBody
         collapseNonce={collapseNonce}
         cwd={cwd}
@@ -235,6 +237,36 @@ export function RightSidebarSectionHeader({ children, className, ...props }: Com
   return (
     <div className={cn('group/project-header flex h-7 shrink-0 items-center px-2.5', className)} {...props}>
       {children}
+    </div>
+  )
+}
+
+// Local patch (unwritten-ops hermes-patch-persistence/pinned-file-tree-jump):
+// one-click jump to the ops project tree, shown only when it sits under the root.
+function PinnedFolderShortcuts({ cwd }: { cwd: string }) {
+  const visiblePins = visiblePinnedFolders(cwd)
+
+  if (visiblePins.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="shrink-0 border-b border-(--ui-stroke-secondary)/60 px-1.5 pb-1">
+      <div className="px-1 pb-0.5 text-[0.58rem] font-semibold uppercase tracking-[0.14em] text-(--ui-text-quaternary)">
+        Pinned
+      </div>
+      {visiblePins.map(pin => (
+        <button
+          className="flex h-6 w-full items-center gap-1.5 rounded-md px-2 text-left text-xs text-(--ui-text-secondary) transition-colors hover:bg-(--ui-row-hover-background) hover:text-foreground"
+          key={pin.path}
+          onClick={() => revealFileInTree(pin.path)}
+          title={pin.path}
+          type="button"
+        >
+          <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="pinned" size="0.75rem" />
+          <span className="min-w-0 flex-1 truncate">{pin.label}</span>
+        </button>
+      ))}
     </div>
   )
 }

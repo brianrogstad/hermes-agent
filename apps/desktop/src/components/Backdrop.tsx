@@ -12,10 +12,10 @@ export function Backdrop() {
   }
 
   return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 z-2 opacity-[0.025] mix-blend-difference">
+    <div aria-hidden className="pointer-events-none absolute inset-0 z-2 opacity-[0.15] mix-blend-normal">
       <img
         alt=""
-        className="h-[160dvh] w-auto min-w-dvw object-cover object-left-top [filter:invert(var(--backdrop-invert-mul,1))]"
+        className="h-[160dvh] w-auto min-w-dvw object-cover object-left-top -translate-y-[14dvh]"
         fetchPriority="low"
         src={assetPath('ds-assets/filler-bg0.jpg')}
       />

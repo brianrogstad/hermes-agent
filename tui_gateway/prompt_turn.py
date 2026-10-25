@@ -681,6 +681,23 @@ def _invoke_agent(
     _title_key = session.get("session_key") or sid
     agent._on_session_title = lambda t, _src, _k=_title_key: _emit(
         "session.title", sid, {"session_id": _k, "title": t})
+    # [live-persona-deal] Re-resolve the dealt persona card before each turn. The
+    # heartbeat re-writes the seated persona every beat (one-card personality);
+    # load_config_readonly is mtime-cached so the no-change path costs microseconds.
+    # ephemeral_system_prompt is appended at API-call time (not baked into the cached
+    # base prompt), so a silent attribute update is the whole refresh. An empty config
+    # value is left alone — /personality none clears via its own path.
+    try:
+        from hermes_cli.config import load_config_readonly as _lpd_cfg
+        _lpd = _lpd_cfg()
+        _lpd_prompt = str((_lpd.get("agent") or {}).get("system_prompt") or "").strip()
+        if _lpd_prompt and _lpd_prompt != (getattr(agent, "ephemeral_system_prompt", None) or ""):
+            agent.ephemeral_system_prompt = _lpd_prompt
+            _lpd_name = str((_lpd.get("display") or {}).get("personality") or "").strip()
+            if _lpd_name:
+                session["personality"] = _lpd_name
+    except Exception:
+        pass
     _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
     try:
         from agent.notification_presentation import notification_turn, event_presentation_muted

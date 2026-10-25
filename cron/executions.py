@@ -7,6 +7,7 @@ to match the claim-time fingerprint is not proof of death. Terminal states are i
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import sqlite3
@@ -21,6 +22,8 @@ from typing import Any, Dict, Iterator, List, Optional
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 from cron.constants import CLAIM_TTL_INACTIVITY_HEADROOM
+
+logger = logging.getLogger(__name__)
 
 # Optional test override. Production resolves the path at transaction time so dashboard operations
 # that temporarily enter another profile cannot leak that profile's records into the import-time
@@ -133,15 +136,16 @@ def _owner_is_live(pid: int, started_at: Optional[int]) -> bool:
             return False
     except Exception:
         return True  # fail safe: inability to prove death must not rewrite state
-    if started_at is None:
-        return pid == os.getpid()
+    if started_at is None or started_at >= 0:
+        # Legacy observer-relative clock baselines were never persisted. Neither
+        # drift nor an absent stamp proves PID reuse while the PID still exists.
+        return True
     current = _process_start_time(pid)
-    if current is None:
-        return True  # cannot compare -> cannot prove death; a misread must not rewrite state
-    # Drifted same-host readings (#117505) are not proof of death; a live misread is still
-    # bounded by the stale-claim sweep below.
-    from gateway.status import start_time_fingerprints_match
-    return start_time_fingerprints_match(started_at, current)
+    if current is None or current >= 0:
+        return True  # missing or incomparable probe cannot prove owner death
+    # Negative native birth fingerprints are comparable integer microseconds.
+    # Even a one-microsecond mismatch proves this is not the recorded owner.
+    return current == started_at
 
 
 def _live_owner_stale_after_seconds() -> Optional[float]:
@@ -316,10 +320,36 @@ _OWNER_WEDGED_REASON = (
 )
 
 
+_OWN_RUN_EXITED_REASON = (
+    "This process's in-process run of the job ended without a durable terminal state "
+    "(its finish never reached the ledger, e.g. the disk filled while saving output) and "
+    "the row outlived the derived stale bound; whether side effects ran is unknown."
+)
+
+
+def _in_flight_in_this_process(job_id: str) -> bool:
+    """True unless this process can prove it has no in-flight run of ``job_id``.
+
+    In-process runs register in the scheduler's running set before the row turns
+    ``running`` and leave it only after their terminal write was attempted
+    (``run_one_job``'s ``finally``), so absence from that set means the run is over.
+    Same signal and fail-closed shape as ``cron.jobs`` stale one-shot recovery.
+    """
+    try:
+        from cron.scheduler import is_job_running
+        return is_job_running(job_id)
+    except Exception:
+        logger.warning(
+            "Cron running-set liveness check failed for job %r; keeping its running "
+            "execution row", job_id, exc_info=True)
+        return True
+
+
 def recover_interrupted_executions() -> int:
     """Mark abandoned attempts unknown without scheduling retries: rows whose owner is provably
-    dead, plus rows whose live owner holds a claim older than the derived stale bound (the
-    process is not killed)."""
+    dead, rows whose live owner holds a claim older than the derived stale bound (the
+    process is not killed), and this process's own ``running`` rows whose run has already
+    left the in-flight set and that outlived the same bound."""
     now = _hermes_now().isoformat()
     changed = 0
     recovered: List[Dict[str, Any]] = []
@@ -330,23 +360,40 @@ def recover_interrupted_executions() -> int:
     with _transaction() as conn:
         rows = conn.execute(
             """SELECT id, status, process_id, pid, process_started_at,
-                      handoff_pending, handoff_started_at, claimed_at
+                      handoff_pending, handoff_started_at, claimed_at, job_id
                FROM executions
                WHERE status IN ('claimed','running')"""
         ).fetchall()
         for row in rows:
-            if row["process_id"] == _PROCESS_ID:
-                continue
             reason = _OWNER_GONE_REASON
-            if _owner_is_live(int(row["pid"]), row["process_started_at"]):
+            if row["process_id"] == _PROCESS_ID:
+                # This process's own in-process run. Its run thread is the only writer of the
+                # terminal row, so a run still in flight is never touched. But when that thread
+                # has already left the running set without its finish reaching the ledger (the
+                # disk filled while saving output, 2026-10-09), the owner pid is this live
+                # gateway: the dead-owner check below can never fire, and the row stays
+                # ``running`` until a restart. Release it only when both hold: no run of the
+                # job is in flight here, and the row has been silent past the derived bound.
+                # ``claimed`` rows may still be queued for a pool slot and are left alone.
+                if row["status"] != "running" or _in_flight_in_this_process(row["job_id"]):
+                    continue
+                if not stale_after_resolved:
+                    stale_after = _live_owner_stale_after_seconds()
+                    stale_after_resolved = True
+                if (
+                    stale_after is None
+                    or _claim_age_seconds(row["claimed_at"]) <= stale_after
+                ):
+                    continue
+                reason = _OWN_RUN_EXITED_REASON
+            elif _owner_is_live(int(row["pid"]), row["process_started_at"]):
                 # A live owner is normally a legitimately running job. A worker permanently
                 # deadlocked (e.g. futex_wait behind a route/proxy flip, #115692) also passes
                 # this check, so a claim older than the derived bound is treated as wedged
                 # and released — the external-worker wait loop polls this ledger for a
                 # terminal status, so the job can fire again. The wedged worker PROCESS is
                 # NOT terminated here (leaked until host restart); rows owned by this process
-                # (process_id == _PROCESS_ID, in-process runs) are skipped above and remain
-                # out of scope.
+                # (process_id == _PROCESS_ID, in-process runs) are handled in the branch above.
                 if not stale_after_resolved:
                     stale_after = _live_owner_stale_after_seconds()
                     stale_after_resolved = True
